@@ -98,10 +98,12 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
     int ns, nr;
     struct sockaddr_in ack_addr;
     socklen_t addrlen;
-    
+
     // Variáveis para fast retransmission
     hseq_t last_ack_seq = 0;
     int dup_ack_count = 0;
+    hseq_t fastRetransmittedSeq = 0;  // Variável para registrar o pacote já retransmitido
+
     
     while (base < num_segments) {
         while (next_seq < num_segments && next_seq < base + WINDOW_SIZE) {
@@ -158,25 +160,35 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
                 continue;
             }
             
-            // Processamento do ACK com detecção de duplicatas
+                        // Processamento do ACK com detecção de duplicatas e controle de fast retransmit
             if (ack.h.pkt_seq == last_ack_seq) {
-                dup_ack_count++;
-                printf("rdt_send: ACK duplicado (%d) para o pacote seq %d\n", dup_ack_count, ack.h.pkt_seq);
-                if (dup_ack_count >= 3) {
-                    printf("rdt_send: Fast retransmission disparada para o pacote seq %d\n", packets[base].h.pkt_seq);
-                    next_seq = base; // Reenvia a partir do pacote faltante
-                    dup_ack_count = 0;
-                    continue;
+                // Se o ACK duplicado for para o mesmo pacote que já foi retransmitido, ignore
+                if (fastRetransmittedSeq != ack.h.pkt_seq) {
+                    dup_ack_count++;
+                    printf("rdt_send: ACK duplicado (%d) para o pacote seq %d\n", dup_ack_count, ack.h.pkt_seq);
+                    if (dup_ack_count >= 3) {
+                        printf("rdt_send: Fast retransmission disparada para o pacote seq %d\n", packets[base].h.pkt_seq);
+                        next_seq = base; // Reenvia a partir do pacote faltante
+                        fastRetransmittedSeq = ack.h.pkt_seq;  // Marca este pacote como retransmitido
+                        dup_ack_count = 0;
+                        continue;
+                    }
+                } else {
+                    // Já houve fast retransmit para esse pacote; ignore ACKs duplicados subsequentes.
+                    printf("rdt_send: ACK duplicado para o mesmo pacote (seq %d) já retransmitido, ignorando.\n", ack.h.pkt_seq);
                 }
             } else if (ack.h.pkt_seq > last_ack_seq) {
+                // Chegou um novo ACK que avança a janela
                 last_ack_seq = ack.h.pkt_seq;
                 dup_ack_count = 0;
+                fastRetransmittedSeq = 0;  // Reinicia o marcador, permitindo novo fast retransmit se necessário
                 int ack_index = ack.h.pkt_seq - _snd_seqnum;
                 if (ack_index >= base && ack_index < num_segments) {
                     printf("rdt_send: ACK recebido para o pacote seq %d\n", ack.h.pkt_seq);
                     base = ack_index + 1;
                 }
             }
+
         }
     }
     _snd_seqnum += num_segments;
