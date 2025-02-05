@@ -67,6 +67,8 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
     int ns, nr, addrlen;
     fd_set read_fds;
     struct timeval timeout;
+    int retries = 0;
+    const int MAX_RETRIES = 5;
 
     if (make_pkt(&p, PKT_DATA, _snd_seqnum, buf, buf_len) < 0)
         return ERROR;
@@ -76,6 +78,11 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
     }
 
 resend:
+    if (retries >= MAX_RETRIES) {
+        printf("rdt_send: Número máximo de retransmissões atingido\n");
+        return ERROR;
+    }
+
     ns = sendto(sockfd, &p, p.h.pkt_size, 0,
                 (struct sockaddr *)dst, sizeof(struct sockaddr_in));
     if (ns < 0) {
@@ -83,27 +90,22 @@ resend:
         return ERROR;
     }
 
-    // Configura o timeout
     timeout.tv_sec = 2;  // Timeout de 2 segundos
     timeout.tv_usec = 0;
 
-    // Configura o descritor de arquivo para select()
     FD_ZERO(&read_fds);
     FD_SET(sockfd, &read_fds);
 
-    // Aguarda por dados no socket ou timeout
     int ret = select(sockfd + 1, &read_fds, NULL, NULL, &timeout);
     if (ret == 0) {
-        // Timeout ocorreu
-        printf("rdt_send: timeout, retransmitindo pacote...\n");
+        printf("rdt_send: timeout, retransmitindo pacote... (tentativa %d)\n", retries + 1);
+        retries++;
         goto resend;
     } else if (ret < 0) {
-        // Erro no select()
         perror("rdt_send: select()");
         return ERROR;
     }
 
-    // Dados disponíveis para leitura
     addrlen = sizeof(struct sockaddr_in);
     nr = recvfrom(sockfd, &ack, sizeof(ack), 0, (struct sockaddr *)&dst_ack,
                   (socklen_t *)&addrlen);
@@ -114,6 +116,7 @@ resend:
 
     if (iscorrupted(&ack) || !has_ackseq(&ack, _snd_seqnum)) {
         printf("rdt_send: iscorrupted || !has_ackseq\n");
+        retries++;
         goto resend;
     }
 
