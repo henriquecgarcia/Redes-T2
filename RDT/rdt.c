@@ -16,7 +16,7 @@
 #define TIMEOUT_USEC  1
 
 // Variáveis globais para sequência.
-int biterror_inject = TRUE;
+int biterror_inject = FALSE;
 hseq_t _snd_seqnum = 1;
 hseq_t _rcv_seqnum = 1;
 
@@ -80,7 +80,7 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
         return ERROR;
     }
     
-    // Criação dos pacotes (sem injeção de erro aqui, a injeção será aplicada na cópia temporária na hora do envio)
+    // Criação dos pacotes (a injeção de erro será aplicada na cópia temporária na hora do envio)
     for (int i = 0; i < num_segments; i++) {
         int offset = i * chunk_size;
         int remaining = buf_len - offset;
@@ -102,16 +102,15 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
     // Variáveis para fast retransmission
     hseq_t last_ack_seq = 0;
     int dup_ack_count = 0;
-    hseq_t fastRetransmittedSeq = 0;  // Variável para registrar o pacote já retransmitido
+    hseq_t fastRetransmittedSeq = 0;  // Para registrar o pacote já retransmitido
 
-    
     while (base < num_segments) {
         while (next_seq < num_segments && next_seq < base + WINDOW_SIZE) {
             // Cria uma cópia temporária do pacote original
             pkt temp_pkt;
             memcpy(&temp_pkt, &packets[next_seq], sizeof(pkt));
             
-            // Injeção de erro (como já implementado anteriormente)
+            // Injeção de erro (aplicada de forma randômica)
             if (biterror_inject) {
                 if (rand() % 100 < 20) {  // 20% de chance
                     printf("rdt_send: Injetando erro no pacote seq %d (tentativa)\n", temp_pkt.h.pkt_seq);
@@ -160,9 +159,8 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
                 continue;
             }
             
-                        // Processamento do ACK com detecção de duplicatas e controle de fast retransmit
+            // Processamento do ACK com detecção de duplicatas e controle de fast retransmit
             if (ack.h.pkt_seq == last_ack_seq) {
-                // Se o ACK duplicado for para o mesmo pacote que já foi retransmitido, ignore
                 if (fastRetransmittedSeq != ack.h.pkt_seq) {
                     dup_ack_count++;
                     printf("rdt_send: ACK duplicado (%d) para o pacote seq %d\n", dup_ack_count, ack.h.pkt_seq);
@@ -174,29 +172,24 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
                         continue;
                     }
                 } else {
-                    // Já houve fast retransmit para esse pacote; ignore ACKs duplicados subsequentes.
                     printf("rdt_send: ACK duplicado para o mesmo pacote (seq %d) já retransmitido, ignorando.\n", ack.h.pkt_seq);
                 }
             } else if (ack.h.pkt_seq > last_ack_seq) {
-                // Chegou um novo ACK que avança a janela
                 last_ack_seq = ack.h.pkt_seq;
                 dup_ack_count = 0;
-                fastRetransmittedSeq = 0;  // Reinicia o marcador, permitindo novo fast retransmit se necessário
+                fastRetransmittedSeq = 0;  // Reinicia o marcador
                 int ack_index = ack.h.pkt_seq - _snd_seqnum;
                 if (ack_index >= base && ack_index < num_segments) {
                     printf("rdt_send: ACK recebido para o pacote seq %d\n", ack.h.pkt_seq);
                     base = ack_index + 1;
                 }
             }
-
         }
     }
     _snd_seqnum += num_segments;
     free(packets);
     return buf_len;
 }
-
-
 
 // Função para recepção de um único segmento (usada para mensagens).
 int rdt_recv(int sockfd, void *buf, int buf_len, struct sockaddr_in *src) {
@@ -243,8 +236,7 @@ rerecv:
     return msg_size;
 }
 
-// Função para enviar um arquivo inteiro. Neste exemplo, o arquivo é carregado
-// completamente na memória. Para arquivos grandes, adapte para ler em blocos.
+// Função para enviar um arquivo inteiro. Para arquivos grandes, adapte para leitura em blocos.
 int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     FILE *fp = fopen(filename, "rb");
     if (!fp) {
@@ -293,7 +285,7 @@ int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     }
     printf("rdt_send_file: Pacote FIN enviado (seq %d).\n", finPkt.h.pkt_seq);
     
-    // (Opcional) Aguarda o ACK do FIN.
+    // Aguarda ACK para o FIN enviado.
     pkt ack;
     struct timeval timeout = {TIMEOUT_SEC, TIMEOUT_USEC};
     fd_set readfds;
@@ -313,10 +305,39 @@ int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
         printf("rdt_send_file: Timeout aguardando ACK do FIN.\n");
     }
     
+    // Fase 2: Aguarda FIN do servidor e envia ACK para ele.
+    FD_ZERO(&readfds);
+    FD_SET(sockfd, &readfds);
+    timeout.tv_sec = TIMEOUT_SEC;
+    timeout.tv_usec = TIMEOUT_USEC;
+    rv = select(sockfd + 1, &readfds, NULL, NULL, &timeout);
+    if (rv > 0) {
+        socklen_t addrlen = sizeof(struct sockaddr_in);
+        ns = recvfrom(sockfd, &ack, sizeof(pkt), 0, NULL, &addrlen);
+        if (ns < 0) {
+            perror("rdt_send_file: recvfrom(PKT_FIN do servidor)");
+            return ERROR;
+        }
+        if (ack.h.pkt_type == PKT_FIN) {
+            printf("rdt_send_file: FIN recebido do servidor (seq %d).\n", ack.h.pkt_seq);
+            if (make_pkt(&ack, PKT_ACK, ack.h.pkt_seq, NULL, 0) < 0)
+                return ERROR;
+            ns = sendto(sockfd, &ack, ack.h.pkt_size, 0,
+                        (struct sockaddr *)dst, sizeof(struct sockaddr_in));
+            if (ns < 0) {
+                perror("rdt_send_file: sendto(PKT_ACK para FIN do servidor)");
+                return ERROR;
+            }
+            printf("rdt_send_file: ACK enviado para o FIN do servidor.\n");
+        }
+    } else {
+        printf("rdt_send_file: Timeout aguardando FIN do servidor.\n");
+    }
+    
     return sent;
 }
 
-// Função para receber um arquivo. Os pacotes serão escritos num arquivo de saída.
+// Função para receber um arquivo. Os pacotes são escritos em um arquivo de saída.
 int rdt_recv_file(int sockfd, const char *filename) {
     FILE *fp = fopen(filename, "wb");
     if (!fp) {
@@ -328,11 +349,14 @@ int rdt_recv_file(int sockfd, const char *filename) {
     pkt p, ack;
     struct sockaddr_in src;
     socklen_t addrlen;
+    fd_set readfds;
+    struct timeval timeout;
+    int ns, nr, rv;
     
     while (1) {
         addrlen = sizeof(struct sockaddr_in);
-        int nr = recvfrom(sockfd, &p, sizeof(pkt), 0,
-                          (struct sockaddr *)&src, &addrlen);
+        nr = recvfrom(sockfd, &p, sizeof(pkt), 0,
+                      (struct sockaddr *)&src, &addrlen);
         if (nr < 0) {
             perror("rdt_recv_file: recvfrom()");
             fclose(fp);
@@ -342,18 +366,54 @@ int rdt_recv_file(int sockfd, const char *filename) {
         // Se o pacote estiver corrompido, reenvia o último ACK.
         if (iscorrupted(&p)) {
             printf("rdt_recv_file: Pacote corrompido, reenviando último ACK.\n");
-            make_pkt(&ack, PKT_ACK, _rcv_seqnum - 1, NULL, 0);
+            if (make_pkt(&ack, PKT_ACK, _rcv_seqnum - 1, NULL, 0) < 0) {
+                fclose(fp);
+                return ERROR;
+            }
             sendto(sockfd, &ack, ack.h.pkt_size, 0,
                    (struct sockaddr *)&src, sizeof(struct sockaddr_in));
             continue;
         }
         
-        // Se for um pacote FIN, envia ACK e encerra a recepção.
+        // Se for um pacote FIN, envia ACK, envia FIN próprio e aguarda ACK para seu FIN.
         if (p.h.pkt_type == PKT_FIN) {
-            make_pkt(&ack, PKT_ACK, p.h.pkt_seq, NULL, 0);
+            // Envia ACK para o FIN recebido do cliente.
+            if (make_pkt(&ack, PKT_ACK, p.h.pkt_seq, NULL, 0) < 0) {
+                fclose(fp);
+                return ERROR;
+            }
             sendto(sockfd, &ack, ack.h.pkt_size, 0,
                    (struct sockaddr *)&src, sizeof(struct sockaddr_in));
-            printf("rdt_recv_file: Pacote FIN recebido. Transferência finalizada.\n");
+            printf("rdt_recv_file: FIN recebido do cliente. ACK enviado para FIN.\n");
+            
+            // Envia FIN do servidor.
+            pkt serverFin;
+            if (make_pkt(&serverFin, PKT_FIN, _snd_seqnum, NULL, 0) < 0) {
+                fclose(fp);
+                return ERROR;
+            }
+            ns = sendto(sockfd, &serverFin, serverFin.h.pkt_size, 0,
+                        (struct sockaddr *)&src, sizeof(struct sockaddr_in));
+            if (ns < 0) {
+                perror("rdt_recv_file: sendto(PKT_FIN do servidor)");
+                fclose(fp);
+                return ERROR;
+            }
+            printf("rdt_recv_file: FIN enviado pelo servidor (seq %d).\n", serverFin.h.pkt_seq);
+            
+            // (Opcional) Aguarda ACK para o FIN do servidor.
+            FD_ZERO(&readfds);
+            FD_SET(sockfd, &readfds);
+            timeout.tv_sec = TIMEOUT_SEC;
+            timeout.tv_usec = TIMEOUT_USEC;
+            rv = select(sockfd + 1, &readfds, NULL, NULL, &timeout);
+            if (rv > 0) {
+                socklen_t ackAddrLen = sizeof(struct sockaddr_in);
+                nr = recvfrom(sockfd, &ack, sizeof(pkt), 0, (struct sockaddr *)&src, &ackAddrLen);
+                if (nr > 0 && ack.h.pkt_type == PKT_ACK && ack.h.pkt_seq == serverFin.h.pkt_seq) {
+                    printf("rdt_recv_file: ACK recebido para o FIN do servidor.\n");
+                }
+            }
             break;
         }
         
@@ -368,14 +428,20 @@ int rdt_recv_file(int sockfd, const char *filename) {
             totalBytes += dataSize;
             printf("rdt_recv_file: Pacote recebido, seq %d (%d bytes).\n", p.h.pkt_seq, dataSize);
             
-            make_pkt(&ack, PKT_ACK, p.h.pkt_seq, NULL, 0);
+            if (make_pkt(&ack, PKT_ACK, p.h.pkt_seq, NULL, 0) < 0) {
+                fclose(fp);
+                return ERROR;
+            }
             sendto(sockfd, &ack, ack.h.pkt_size, 0,
                    (struct sockaddr *)&src, sizeof(struct sockaddr_in));
             _rcv_seqnum++;
         } else {
             // Caso o pacote esteja fora de ordem, reenvia o último ACK cumulativo.
             printf("rdt_recv_file: Pacote fora de ordem (esperado seq %d).\n", _rcv_seqnum);
-            make_pkt(&ack, PKT_ACK, _rcv_seqnum - 1, NULL, 0);
+            if (make_pkt(&ack, PKT_ACK, _rcv_seqnum - 1, NULL, 0) < 0) {
+                fclose(fp);
+                return ERROR;
+            }
             sendto(sockfd, &ack, ack.h.pkt_size, 0,
                    (struct sockaddr *)&src, sizeof(struct sockaddr_in));
         }
