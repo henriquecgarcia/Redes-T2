@@ -11,7 +11,10 @@
 #include "rdt.h"
 
 // Configurações da janela e timeout estático padrão.
+// Configurações de janela de transmissão
 #define STATIC_WINDOW_SIZE 5
+#define MAX_DYNAMIC_WINDOW 20
+#define MIN_DYNAMIC_WINDOW 1
 #define TIMEOUT_SEC        5
 #define TIMEOUT_USEC       1
 
