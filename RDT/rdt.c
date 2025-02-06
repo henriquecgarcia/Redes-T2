@@ -10,6 +10,10 @@
 #include <errno.h>
 #include "rdt.h"
 
+// Variáveis globais para sequência
+uint32_t _snd_seqnum = 1;
+uint32_t _rcv_seqnum = 1;
+
 // Configurações de janela de transmissão
 #define STATIC_WINDOW_SIZE 5
 #define MAX_DYNAMIC_WINDOW 20
