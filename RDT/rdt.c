@@ -21,11 +21,11 @@ hseq_t _snd_seqnum = 1;
 hseq_t _rcv_seqnum = 1;
 
 // Variáveis globais para a janela de transmissão dinâmica.
-int dynamic_window_enabled = 0;   // 0 = janela estática, 1 = janela dinâmica
+int dynamic_window_enabled = TRUE;   // 0 = janela estática, 1 = janela dinâmica
 int current_window_size = STATIC_WINDOW_SIZE;
 
 // Variáveis globais para timeout: se dinâmico, serão ajustados.
-int dynamic_timeout_enabled = 0;    // 0 = timeout estático, 1 = timeout dinâmico
+int dynamic_timeout_enabled = TRUE;    // 0 = timeout estático, 1 = timeout dinâmico
 int current_timeout_sec = TIMEOUT_SEC;
 int current_timeout_usec = TIMEOUT_USEC;
 const int MAX_TIMEOUT_SEC = 10;     // valor máximo de timeout
