@@ -20,12 +20,25 @@ uint32_t _rcv_seqnum = 1;
 #define MIN_DYNAMIC_WINDOW 1
 
 // Flag para escolher o modo de janela: 0 = estática, 1 = dinâmica.
-int dynamic_window_enabled = 1;
+int dynamic_window_enabled = TRUE;
 int current_window_size = STATIC_WINDOW_SIZE;
+
+// Flag para injeção de erro (20% de chance de corromper um pacote)
+int biterror_inject = FALSE;
 
 // Timeout
 #define TIMEOUT_SEC 5
 #define TIMEOUT_USEC 1
+
+// Prototipos de funções
+unsigned short checksum(unsigned short *buf, int nbytes);
+int iscorrupted(pkt *pr);
+int make_pkt(pkt *p, htype_t type, uint32_t seqnum, void *msg, int msg_len);
+int has_ackseq(pkt *p, uint32_t seqnum);
+int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst);
+int rdt_recv(int sockfd, void *buf, int buf_len, struct sockaddr_in *src);
+int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst);
+int rdt_recv_file(int sockfd, const char *filename);
 
 // Implementações
 
