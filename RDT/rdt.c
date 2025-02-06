@@ -8,66 +8,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <errno.h>
-
-// Definições
-#define MAX_MSG_LEN 1024
-#define SUCCESS 0
-#define ERROR   -1
-
-// Tipos de pacotes
-typedef enum {
-    PKT_DATA  = 0,
-    PKT_ACK   = 1,
-    PKT_FIN   = 2,
-    PKT_START = 3  // Novo tipo: pacote de início (start packet)
-} htype_t;
-
-// Estrutura do header
-typedef struct {
-    int pkt_size;           // Tamanho total do pacote (header + payload)
-    unsigned short csum;    // Checksum do pacote
-    htype_t pkt_type;       // Tipo do pacote
-    uint32_t pkt_seq;       // Número de sequência
-} hdr;
-
-// Estrutura do pacote
-typedef struct {
-    hdr h;
-    char msg[MAX_MSG_LEN];
-} pkt;
-
-// Estrutura para metadados do arquivo (usada no PKT_START)
-typedef struct {
-    char filename[256];
-    long fileSize;
-} file_meta;
-
-// Variáveis globais para sequência
-uint32_t _snd_seqnum = 1;
-uint32_t _rcv_seqnum = 1;
-
-// Configurações de janela de transmissão
-#define STATIC_WINDOW_SIZE 5
-#define MAX_DYNAMIC_WINDOW 20
-#define MIN_DYNAMIC_WINDOW 1
-
-// Flag para escolher o modo de janela: 0 = estática, 1 = dinâmica.
-int dynamic_window_enabled = 0;
-int current_window_size = STATIC_WINDOW_SIZE;
-
-// Timeout
-#define TIMEOUT_SEC 5
-#define TIMEOUT_USEC 1
-
-// Prototipos de funções
-unsigned short checksum(unsigned short *buf, int nbytes);
-int iscorrupted(pkt *pr);
-int make_pkt(pkt *p, htype_t type, uint32_t seqnum, void *msg, int msg_len);
-int has_ackseq(pkt *p, uint32_t seqnum);
-int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst);
-int rdt_recv(int sockfd, void *buf, int buf_len, struct sockaddr_in *src);
-int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst);
-int rdt_recv_file(int sockfd, const char *filename);
+#include "rdt.h"
 
 // Implementações
 
