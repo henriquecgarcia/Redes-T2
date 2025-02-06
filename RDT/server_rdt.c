@@ -5,6 +5,19 @@
 #include <unistd.h>
 #include "rdt.h"
 
+// Configurações de janela de transmissão
+#define STATIC_WINDOW_SIZE 5
+#define MAX_DYNAMIC_WINDOW 20
+#define MIN_DYNAMIC_WINDOW 1
+
+// Flag para escolher o modo de janela: 0 = estática, 1 = dinâmica.
+int dynamic_window_enabled = 1;
+int current_window_size = STATIC_WINDOW_SIZE;
+
+// Timeout
+#define TIMEOUT_SEC 5
+#define TIMEOUT_USEC 1
+
 int main(int argc, char *argv[]) {
     if (argc != 2) { 
         fprintf(stderr, "Uso: %s <porta_de_escuta>\n", argv[0]);
