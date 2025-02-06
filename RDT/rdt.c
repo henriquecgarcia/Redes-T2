@@ -10,37 +10,26 @@
 #include <errno.h>
 #include "rdt.h"
 
-// Variáveis globais para sequência
-uint32_t _snd_seqnum = 1;
-uint32_t _rcv_seqnum = 1;
-
-// Configurações de janela de transmissão
+// Configurações da janela e timeout estático padrão.
 #define STATIC_WINDOW_SIZE 5
-#define MAX_DYNAMIC_WINDOW 20
-#define MIN_DYNAMIC_WINDOW 1
+#define TIMEOUT_SEC        5
+#define TIMEOUT_USEC       1
 
-// Flag para escolher o modo de janela: 0 = estática, 1 = dinâmica.
-int dynamic_window_enabled = TRUE;
+// Variáveis globais para sequência (definidas como extern em rdt.h).
+int biterror_inject = FALSE;
+hseq_t _snd_seqnum = 1;
+hseq_t _rcv_seqnum = 1;
+
+// Variáveis globais para a janela de transmissão dinâmica.
+int dynamic_window_enabled = 0;   // 0 = janela estática, 1 = janela dinâmica
 int current_window_size = STATIC_WINDOW_SIZE;
 
-// Flag para injeção de erro (20% de chance de corromper um pacote)
-int biterror_inject = FALSE;
-
-// Timeout
-#define TIMEOUT_SEC 5
-#define TIMEOUT_USEC 1
-
-// Prototipos de funções
-unsigned short checksum(unsigned short *buf, int nbytes);
-int iscorrupted(pkt *pr);
-int make_pkt(pkt *p, htype_t type, uint32_t seqnum, void *msg, int msg_len);
-int has_ackseq(pkt *p, uint32_t seqnum);
-int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst);
-int rdt_recv(int sockfd, void *buf, int buf_len, struct sockaddr_in *src);
-int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst);
-int rdt_recv_file(int sockfd, const char *filename);
-
-// Implementações
+// Variáveis globais para timeout: se dinâmico, serão ajustados.
+int dynamic_timeout_enabled = 0;    // 0 = timeout estático, 1 = timeout dinâmico
+int current_timeout_sec = TIMEOUT_SEC;
+int current_timeout_usec = TIMEOUT_USEC;
+const int MAX_TIMEOUT_SEC = 10;     // valor máximo de timeout
+const int MIN_TIMEOUT_SEC = TIMEOUT_SEC; // valor mínimo de timeout
 
 // Função de checksum: calcula a soma de verificação do buffer.
 unsigned short checksum(unsigned short *buf, int nbytes) {
@@ -67,7 +56,7 @@ int iscorrupted(pkt *pr) {
 }
 
 // Cria um pacote com o header, copia o payload (se houver) e calcula o checksum.
-int make_pkt(pkt *p, htype_t type, uint32_t seqnum, void *msg, int msg_len) {
+int make_pkt(pkt *p, htype_t type, hseq_t seqnum, void *msg, int msg_len) {
     if (msg_len > MAX_MSG_LEN) {
         fprintf(stderr, "make_pkt: tamanho da mensagem %d excede MAX_MSG_LEN %d\n", msg_len, MAX_MSG_LEN);
         return ERROR;
@@ -86,14 +75,13 @@ int make_pkt(pkt *p, htype_t type, uint32_t seqnum, void *msg, int msg_len) {
 }
 
 // Verifica se o pacote ACK recebido possui o número de sequência esperado.
-int has_ackseq(pkt *p, uint32_t seqnum) {
+int has_ackseq(pkt *p, hseq_t seqnum) {
     if (p->h.pkt_type != PKT_ACK || p->h.pkt_seq != seqnum)
-        return 0;
-    return 1;
+        return FALSE;
+    return TRUE;
 }
 
-// Função rdt_send: envia os dados segmentados usando uma janela de transmissão.
-// Se dynamic_window_enabled for 1, a janela é ajustada dinamicamente.
+// Função rdt_send: envia um buffer segmentado usando uma janela de transmissão.
 int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
     int chunk_size = MAX_MSG_LEN;
     int num_segments = (buf_len + chunk_size - 1) / chunk_size;
@@ -115,8 +103,8 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
         }
     }
     
-    // Se a janela for estática, usamos o valor definido; se dinâmica, iniciamos com STATIC_WINDOW_SIZE.
-    current_window_size = STATIC_WINDOW_SIZE;
+    // Ajusta a janela de transmissão: se dinâmica, usamos current_window_size; caso contrário, usamos STATIC_WINDOW_SIZE.
+    current_window_size = dynamic_window_enabled ? current_window_size : STATIC_WINDOW_SIZE;
     
     int base = 0;
     int next_seq = 0;
@@ -125,11 +113,11 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
     int ns, nr;
     struct sockaddr_in ack_addr;
     socklen_t addrlen;
-
+    
     // Variáveis para fast retransmission
-    uint32_t last_ack_seq = 0;
+    hseq_t last_ack_seq = 0;
     int dup_ack_count = 0;
-    uint32_t fastRetransmittedSeq = 0;
+    hseq_t fastRetransmittedSeq = 0;
     
     while (base < num_segments) {
         // Envia os pacotes dentro da janela.
@@ -159,8 +147,8 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
         
         FD_ZERO(&readfds);
         FD_SET(sockfd, &readfds);
-        timeout.tv_sec = TIMEOUT_SEC;
-        timeout.tv_usec = TIMEOUT_USEC;
+        timeout.tv_sec = current_timeout_sec;
+        timeout.tv_usec = current_timeout_usec;
         
         int rv = select(sockfd + 1, &readfds, NULL, NULL, &timeout);
         if (rv < 0) {
@@ -169,14 +157,14 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
             return ERROR;
         } else if (rv == 0) {
             printf("rdt_send: Timeout. Retransmitindo a partir do pacote seq %d\n", packets[base].h.pkt_seq);
-            // Se estiver em modo dinâmico, reduz a janela (mínimo MIN_DYNAMIC_WINDOW)
-            if (dynamic_window_enabled) {
-                current_window_size /= 2;
-                if (current_window_size < MIN_DYNAMIC_WINDOW)
-                    current_window_size = MIN_DYNAMIC_WINDOW;
-                printf("rdt_send: Janela dinâmica reduzida para %d\n", current_window_size);
-            }
             next_seq = base;
+            // Se timeout dinâmico estiver habilitado, aumenta o timeout (exponential backoff simples).
+            if (dynamic_timeout_enabled) {
+                current_timeout_sec *= 2;
+                if (current_timeout_sec > MAX_TIMEOUT_SEC)
+                    current_timeout_sec = MAX_TIMEOUT_SEC;
+                printf("rdt_send: Novo timeout dinâmico: %d segundos\n", current_timeout_sec);
+            }
             continue;
         } else {
             pkt ack;
@@ -216,7 +204,14 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
                 if (ack_index >= base && ack_index < num_segments) {
                     printf("rdt_send: ACK recebido para o pacote seq %d\n", ack.h.pkt_seq);
                     base = ack_index + 1;
-                    // Se estiver em modo dinâmico, aumente a janela até um máximo
+                    // Se o timeout for dinâmico e houver sucesso, diminua-o (gradualmente, até o mínimo)
+                    if (dynamic_timeout_enabled && current_timeout_sec > MIN_TIMEOUT_SEC) {
+                        current_timeout_sec--;
+                        if (current_timeout_sec < MIN_TIMEOUT_SEC)
+                            current_timeout_sec = MIN_TIMEOUT_SEC;
+                        printf("rdt_send: Timeout dinâmico reduzido para %d segundos\n", current_timeout_sec);
+                    }
+                    // Se a janela for dinâmica, aumente-a (até o limite máximo definido em rdt.h)
                     if (dynamic_window_enabled && current_window_size < MAX_DYNAMIC_WINDOW) {
                         current_window_size++;
                         printf("rdt_send: Janela dinâmica aumentada para %d\n", current_window_size);
@@ -275,7 +270,8 @@ rerecv:
     return msg_size;
 }
 
-// Função rdt_send_file: envia um arquivo inteiro, incluindo o pacote PKT_START com metadados.
+// Função rdt_send_file: envia um arquivo inteiro incluindo o PKT_START (metadados),
+// os dados segmentados via rdt_send e finaliza com handshake de terminação.
 int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     FILE *fp = fopen(filename, "rb");
     if (!fp) {
@@ -308,7 +304,7 @@ int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     printf("rdt_send_file: PKT_START enviado (seq %d). Nome: %s, Tamanho: %ld bytes.\n", 
            startPkt.h.pkt_seq, meta.filename, meta.fileSize);
     
-    // Reinicia a numeração para os pacotes de dados: o receptor espera que o primeiro pacote de dados seja o seq 1.
+    // Reinicia a numeração para os pacotes de dados: o receptor espera que o primeiro pacote seja seq 1.
     _snd_seqnum = 1;
     
     // Lê o arquivo para um buffer (para arquivos grandes, adapte para leitura em blocos).
@@ -326,7 +322,6 @@ int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     }
     fclose(fp);
     
-    // Envia os dados do arquivo usando rdt_send.
     int sent = rdt_send(sockfd, fileBuffer, fileSize, dst);
     if (sent < 0) {
         free(fileBuffer);
@@ -349,7 +344,7 @@ int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     
     // Aguarda ACK para o FIN enviado.
     pkt ack;
-    struct timeval timeout = {TIMEOUT_SEC, TIMEOUT_USEC};
+    struct timeval timeout = {current_timeout_sec, current_timeout_usec};
     fd_set readfds;
     FD_ZERO(&readfds);
     FD_SET(sockfd, &readfds);
@@ -370,8 +365,8 @@ int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     // Fase 2: Aguarda FIN do servidor e envia ACK para ele.
     FD_ZERO(&readfds);
     FD_SET(sockfd, &readfds);
-    timeout.tv_sec = TIMEOUT_SEC;
-    timeout.tv_usec = TIMEOUT_USEC;
+    timeout.tv_sec = current_timeout_sec;
+    timeout.tv_usec = current_timeout_usec;
     rv = select(sockfd + 1, &readfds, NULL, NULL, &timeout);
     if (rv > 0) {
         socklen_t addrlen = sizeof(struct sockaddr_in);
@@ -399,8 +394,8 @@ int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     return sent;
 }
 
-
-// Função rdt_recv_file: recebe um arquivo e grava no sistema de arquivos. O receptor aguarda o PKT_START com os metadados.
+// Função rdt_recv_file: recebe um arquivo e grava no sistema de arquivos.
+// O receptor espera inicialmente um PKT_START com metadados.
 int rdt_recv_file(int sockfd, const char *filename) {
     FILE *fp = NULL;
     pkt p, ack;
@@ -411,7 +406,7 @@ int rdt_recv_file(int sockfd, const char *filename) {
     int ns, nr, rv;
     int totalBytes = 0;
     
-    // Primeiro, aguarda o PKT_START com os metadados do arquivo.
+    // Aguarda o PKT_START com os metadados do arquivo.
     addrlen = sizeof(struct sockaddr_in);
     nr = recvfrom(sockfd, &p, sizeof(pkt), 0, (struct sockaddr *)&src, &addrlen);
     if (nr < 0) {
@@ -439,14 +434,14 @@ int rdt_recv_file(int sockfd, const char *filename) {
         return ERROR;
     }
     
-    // Abre o arquivo para escrita. Pode-se usar o nome recebido nos metadados ou o parâmetro filename.
+    // Abre o arquivo para escrita; usa o nome recebido ou o parâmetro filename.
     fp = fopen(meta.filename, "wb");
     if (!fp) {
         perror("rdt_recv_file: fopen");
         return ERROR;
     }
     
-    // Agora, recebe os pacotes de dados.
+    // Recebe os pacotes de dados.
     while (1) {
         addrlen = sizeof(struct sockaddr_in);
         nr = recvfrom(sockfd, &p, sizeof(pkt), 0, (struct sockaddr *)&src, &addrlen);
@@ -495,8 +490,8 @@ int rdt_recv_file(int sockfd, const char *filename) {
             // (Opcional) Aguarda ACK para o FIN do servidor.
             FD_ZERO(&readfds);
             FD_SET(sockfd, &readfds);
-            timeout.tv_sec = TIMEOUT_SEC;
-            timeout.tv_usec = TIMEOUT_USEC;
+            timeout.tv_sec = current_timeout_sec;
+            timeout.tv_usec = current_timeout_usec;
             rv = select(sockfd + 1, &readfds, NULL, NULL, &timeout);
             if (rv > 0) {
                 socklen_t ackAddrLen = sizeof(struct sockaddr_in);
@@ -508,7 +503,6 @@ int rdt_recv_file(int sockfd, const char *filename) {
             break;
         }
         
-        // Se for um pacote de dados com a sequência esperada.
         if (p.h.pkt_type == PKT_DATA && p.h.pkt_seq == _rcv_seqnum) {
             int dataSize = p.h.pkt_size - sizeof(hdr);
             if (fwrite(p.msg, 1, dataSize, fp) != dataSize) {
