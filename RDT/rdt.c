@@ -11,11 +11,10 @@
 #include "rdt.h"
 
 // Configurações da janela e timeout estático padrão.
-// Configurações de janela de transmissão
 #define STATIC_WINDOW_SIZE 5
 #define MAX_DYNAMIC_WINDOW 20
 #define MIN_DYNAMIC_WINDOW 1
-#define TIMEOUT_SEC        5
+#define TIMEOUT_SEC        2
 #define TIMEOUT_USEC       1
 
 // Variáveis globais para sequência (definidas como extern em rdt.h).
@@ -24,7 +23,7 @@ hseq_t _snd_seqnum = 1;
 hseq_t _rcv_seqnum = 1;
 
 // Variáveis globais para a janela de transmissão dinâmica.
-int dynamic_window_enabled = TRUE;   // 0 = janela estática, 1 = janela dinâmica
+int dynamic_window_enabled = FALSE;   // 0 = janela estática, 1 = janela dinâmica
 int current_window_size = STATIC_WINDOW_SIZE;
 
 // Variáveis globais para timeout: se dinâmico, serão ajustados.
@@ -33,6 +32,10 @@ int current_timeout_sec = TIMEOUT_SEC;
 int current_timeout_usec = TIMEOUT_USEC;
 const int MAX_TIMEOUT_SEC = 10;     // valor máximo de timeout
 const int MIN_TIMEOUT_SEC = TIMEOUT_SEC; // valor mínimo de timeout
+
+// Nova flag para ativar ou desativar o fast retransmit.
+// 1 = fast retransmit ativado, 0 = fast retransmit desativado.
+int fast_retransmit_enabled = FALSE;
 
 // Função de checksum: calcula a soma de verificação do buffer.
 unsigned short checksum(unsigned short *buf, int nbytes) {
@@ -85,6 +88,8 @@ int has_ackseq(pkt *p, hseq_t seqnum) {
 }
 
 // Função rdt_send: envia um buffer segmentado usando uma janela de transmissão.
+// Se dynamic_window_enabled for 1, a janela é ajustada dinamicamente.
+// O fast retransmit é acionado se a flag fast_retransmit_enabled estiver ativada.
 int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
     int chunk_size = MAX_MSG_LEN;
     int num_segments = (buf_len + chunk_size - 1) / chunk_size;
@@ -106,7 +111,7 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
         }
     }
     
-    // Ajusta a janela de transmissão: se dinâmica, usamos current_window_size; caso contrário, usamos STATIC_WINDOW_SIZE.
+    // Ajusta a janela de transmissão: se dinâmica, usa current_window_size; caso contrário, STATIC_WINDOW_SIZE.
     current_window_size = dynamic_window_enabled ? current_window_size : STATIC_WINDOW_SIZE;
     
     int base = 0;
@@ -161,7 +166,6 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
         } else if (rv == 0) {
             printf("rdt_send: Timeout. Retransmitindo a partir do pacote seq %d\n", packets[base].h.pkt_seq);
             next_seq = base;
-            // Se timeout dinâmico estiver habilitado, aumenta o timeout (exponential backoff simples).
             if (dynamic_timeout_enabled) {
                 current_timeout_sec *= 2;
                 if (current_timeout_sec > MAX_TIMEOUT_SEC)
@@ -184,40 +188,50 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
                 continue;
             }
             
-            // Processamento do ACK com detecção de duplicatas e fast retransmit
-            if (ack.h.pkt_seq == last_ack_seq) {
-                if (fastRetransmittedSeq != ack.h.pkt_seq) {
-                    dup_ack_count++;
-                    printf("rdt_send: ACK duplicado (%d) para o pacote seq %d\n", dup_ack_count, ack.h.pkt_seq);
-                    if (dup_ack_count >= 3) {
-                        printf("rdt_send: Fast retransmission disparada para o pacote seq %d\n", packets[base].h.pkt_seq);
-                        next_seq = base;
-                        fastRetransmittedSeq = ack.h.pkt_seq;
-                        dup_ack_count = 0;
-                        continue;
+            // Se o fast retransmit estiver habilitado, processa os ACKs duplicados.
+            if (fast_retransmit_enabled) {
+                if (ack.h.pkt_seq == last_ack_seq) {
+                    if (fastRetransmittedSeq != ack.h.pkt_seq) {
+                        dup_ack_count++;
+                        printf("rdt_send: ACK duplicado (%d) para o pacote seq %d\n", dup_ack_count, ack.h.pkt_seq);
+                        if (dup_ack_count >= 3) {
+                            printf("rdt_send: Fast retransmission disparada para o pacote seq %d\n", packets[base].h.pkt_seq);
+                            next_seq = base;
+                            fastRetransmittedSeq = ack.h.pkt_seq;
+                            dup_ack_count = 0;
+                            continue;
+                        }
+                    } else {
+                        printf("rdt_send: ACK duplicado para o mesmo pacote (seq %d) já retransmitido, ignorando.\n", ack.h.pkt_seq);
                     }
-                } else {
-                    printf("rdt_send: ACK duplicado para o mesmo pacote (seq %d) já retransmitido, ignorando.\n", ack.h.pkt_seq);
+                } else if (ack.h.pkt_seq > last_ack_seq) {
+                    last_ack_seq = ack.h.pkt_seq;
+                    dup_ack_count = 0;
+                    fastRetransmittedSeq = 0;
+                    int ack_index = ack.h.pkt_seq - _snd_seqnum;
+                    if (ack_index >= base && ack_index < num_segments) {
+                        printf("rdt_send: ACK recebido para o pacote seq %d\n", ack.h.pkt_seq);
+                        base = ack_index + 1;
+                        if (dynamic_timeout_enabled && current_timeout_sec > MIN_TIMEOUT_SEC) {
+                            current_timeout_sec--;
+                            if (current_timeout_sec < MIN_TIMEOUT_SEC)
+                                current_timeout_sec = MIN_TIMEOUT_SEC;
+                            printf("rdt_send: Timeout dinâmico reduzido para %d segundos\n", current_timeout_sec);
+                        }
+                        if (dynamic_window_enabled && current_window_size < MAX_DYNAMIC_WINDOW) {
+                            current_window_size++;
+                            printf("rdt_send: Janela dinâmica aumentada para %d\n", current_window_size);
+                        }
+                    }
                 }
-            } else if (ack.h.pkt_seq > last_ack_seq) {
-                last_ack_seq = ack.h.pkt_seq;
-                dup_ack_count = 0;
-                fastRetransmittedSeq = 0;
-                int ack_index = ack.h.pkt_seq - _snd_seqnum;
-                if (ack_index >= base && ack_index < num_segments) {
-                    printf("rdt_send: ACK recebido para o pacote seq %d\n", ack.h.pkt_seq);
-                    base = ack_index + 1;
-                    // Se o timeout for dinâmico e houver sucesso, diminua-o (gradualmente, até o mínimo)
-                    if (dynamic_timeout_enabled && current_timeout_sec > MIN_TIMEOUT_SEC) {
-                        current_timeout_sec--;
-                        if (current_timeout_sec < MIN_TIMEOUT_SEC)
-                            current_timeout_sec = MIN_TIMEOUT_SEC;
-                        printf("rdt_send: Timeout dinâmico reduzido para %d segundos\n", current_timeout_sec);
-                    }
-                    // Se a janela for dinâmica, aumente-a (até o limite máximo definido em rdt.h)
-                    if (dynamic_window_enabled && current_window_size < MAX_DYNAMIC_WINDOW) {
-                        current_window_size++;
-                        printf("rdt_send: Janela dinâmica aumentada para %d\n", current_window_size);
+            } else {
+                // Se fast retransmit estiver desativado, ignoramos a contagem de ACKs duplicados.
+                if (ack.h.pkt_seq > last_ack_seq) {
+                    last_ack_seq = ack.h.pkt_seq;
+                    int ack_index = ack.h.pkt_seq - _snd_seqnum;
+                    if (ack_index >= base && ack_index < num_segments) {
+                        printf("rdt_send: ACK recebido para o pacote seq %d\n", ack.h.pkt_seq);
+                        base = ack_index + 1;
                     }
                 }
             }
@@ -228,7 +242,7 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
     return buf_len;
 }
 
-// Função rdt_recv: recebe um único pacote de dados (usado para mensagens)
+// Função rdt_recv: recebe um único pacote de dados (usado para mensagens).
 int rdt_recv(int sockfd, void *buf, int buf_len, struct sockaddr_in *src) {
     pkt p, ack;
     int nr, ns;
@@ -437,7 +451,7 @@ int rdt_recv_file(int sockfd, const char *filename) {
         return ERROR;
     }
     
-    // Abre o arquivo para escrita; usa o nome recebido ou o parâmetro filename.
+    // Abre o arquivo para escrita; utiliza o nome recebido nos metadados.
     fp = fopen(meta.filename, "wb");
     if (!fp) {
         perror("rdt_recv_file: fopen");
