@@ -275,6 +275,7 @@ rerecv:
     return msg_size;
 }
 
+// Função rdt_send_file: envia um arquivo inteiro, incluindo o pacote PKT_START com metadados.
 int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     FILE *fp = fopen(filename, "rb");
     if (!fp) {
@@ -397,6 +398,7 @@ int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     
     return sent;
 }
+
 
 // Função rdt_recv_file: recebe um arquivo e grava no sistema de arquivos. O receptor aguarda o PKT_START com os metadados.
 int rdt_recv_file(int sockfd, const char *filename) {
