@@ -275,7 +275,6 @@ rerecv:
     return msg_size;
 }
 
-// Função rdt_send_file: envia um arquivo inteiro, incluindo o pacote PKT_START com metadados.
 int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     FILE *fp = fopen(filename, "rb");
     if (!fp) {
@@ -287,14 +286,14 @@ int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     long fileSize = ftell(fp);
     rewind(fp);
     
-    // Envia o PKT_START com os metadados do arquivo.
+    // Envia o PKT_START com os metadados do arquivo usando seq 0.
     file_meta meta;
     memset(&meta, 0, sizeof(file_meta));
     strncpy(meta.filename, filename, sizeof(meta.filename)-1);
     meta.fileSize = fileSize;
     
     pkt startPkt;
-    if (make_pkt(&startPkt, PKT_START, _snd_seqnum, &meta, sizeof(file_meta)) < 0) {
+    if (make_pkt(&startPkt, PKT_START, 0, &meta, sizeof(file_meta)) < 0) {
         fclose(fp);
         return ERROR;
     }
@@ -307,7 +306,9 @@ int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst) {
     }
     printf("rdt_send_file: PKT_START enviado (seq %d). Nome: %s, Tamanho: %ld bytes.\n", 
            startPkt.h.pkt_seq, meta.filename, meta.fileSize);
-    _snd_seqnum++; // Incrementa a sequência para os dados do arquivo.
+    
+    // Reinicia a numeração para os pacotes de dados: o receptor espera que o primeiro pacote de dados seja o seq 1.
+    _snd_seqnum = 1;
     
     // Lê o arquivo para um buffer (para arquivos grandes, adapte para leitura em blocos).
     char *fileBuffer = malloc(fileSize);
