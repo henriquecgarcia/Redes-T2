@@ -31,23 +31,23 @@ typedef struct {
 } hdr;
 
 // Estrutura do pacote, com header e espaço para payload.
-typedef struct {
+typedef struct { 
     hdr h;
     char msg[MAX_MSG_LEN];
 } pkt;
 
 // Declaração das funções do protocolo.
-unsigned short checksum(unsigned short *buf, int nbytes);
-int iscorrupted(pkt *pr);
-int make_pkt(pkt *p, htype_t type, hseq_t seqnum, void *msg, int msg_len);
-int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst);
-int rdt_recv(int sockfd, void *buf, int buf_len, struct sockaddr_in *src);
-int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst);
-int rdt_recv_file(int sockfd, const char *filename);
+unsigned short checksum(unsigned short *buf, int nbytes); // Função de checksum
+int iscorrupted(pkt *pr); // Verifica se o pacote está corrompido
+int make_pkt(pkt *p, htype_t type, hseq_t seqnum, void *msg, int msg_len); // Cria um pacote
+int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst); // Função de envio
+int rdt_recv(int sockfd, void *buf, int buf_len, struct sockaddr_in *src); // Função de recepção
+int rdt_send_file(int sockfd, const char *filename, struct sockaddr_in *dst); // Função de envio de arquivo
+int rdt_recv_file(int sockfd, const char *filename); // Função de recepção de arquivo
 
 // Variáveis globais para gerenciar a sequência.
-extern int biterror_inject;
-extern hseq_t _snd_seqnum;
-extern hseq_t _rcv_seqnum;
+extern int biterror_inject; // Flag para injeção de erro
+extern hseq_t _snd_seqnum; // Número de sequência do transmissor
+extern hseq_t _rcv_seqnum; // Número de sequência do receptor
 
 #endif
