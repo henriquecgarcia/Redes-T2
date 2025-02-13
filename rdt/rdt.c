@@ -508,7 +508,7 @@ int rdt_recv_file(int sockfd, const char *filename) {
     }
     memcpy(&meta, p.msg, sizeof(file_meta));
     printf("rdt_recv_file: PKT_START recebido. Nome do arquivo: %s, Tamanho: %ld bytes.\n", meta.filename, meta.fileSize);
-    // (Opcional) Envia ACK para o PKT_START.
+    // Envia ACK para o PKT_START.
     if (make_pkt(&ack, PKT_ACK, p.h.pkt_seq, NULL, 0) < 0)
         return ERROR;
     ns = sendto(sockfd, &ack, ack.h.pkt_size, 0, (struct sockaddr *)&src, sizeof(struct sockaddr_in));
