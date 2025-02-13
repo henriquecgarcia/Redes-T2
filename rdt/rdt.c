@@ -570,7 +570,7 @@ int rdt_recv_file(int sockfd, const char *filename) {
             }
             printf("rdt_recv_file: FIN enviado pelo servidor (seq %d).\n", serverFin.h.pkt_seq);
             
-            // (Opcional) Aguarda ACK para o FIN do servidor.
+            // Aguarda ACK para o FIN do servidor.
             FD_ZERO(&readfds);
             FD_SET(sockfd, &readfds);
             timeout.tv_sec = current_timeout_sec;
