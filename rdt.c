@@ -14,8 +14,8 @@
 #define STATIC_WINDOW_SIZE 5
 #define MAX_DYNAMIC_WINDOW 20
 #define MIN_DYNAMIC_WINDOW 1
-#define TIMEOUT_SEC        2
-#define TIMEOUT_USEC       1
+#define TIMEOUT_SEC        4
+#define TIMEOUT_USEC       100000
 
 // Variáveis globais para sequência (definidas como extern em rdt.h).
 int biterror_inject = FALSE;
@@ -23,7 +23,7 @@ hseq_t _snd_seqnum = 1;
 hseq_t _rcv_seqnum = 1;
 
 // Variáveis globais para a janela de transmissão dinâmica.
-int dynamic_window_enabled = TRUE;   // 0 = janela estática, 1 = janela dinâmica
+int dynamic_window_enabled = FALSE;   // 0 = janela estática, 1 = janela dinâmica
 int current_window_size = STATIC_WINDOW_SIZE;
 
 // Variáveis globais para timeout: se dinâmico, serão ajustados.
@@ -93,6 +93,10 @@ int has_ackseq(pkt *p, hseq_t seqnum) {
 int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
     int chunk_size = MAX_MSG_LEN;
     int num_segments = (buf_len + chunk_size - 1) / chunk_size;
+    double send_time[num_segments];
+    double sample_rtt;
+    double estimate_rtt = 0.100000;
+    double dev_rtt = 0.005000;
     
     pkt *packets = malloc(num_segments * sizeof(pkt));
     if (!packets) {
@@ -117,6 +121,10 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
     int base = 0;
     int next_seq = 0;
     struct timeval timeout;
+    timeout.tv_sec = current_timeout_sec;
+    timeout.tv_usec = current_timeout_usec;
+    struct timeval send;
+    struct timeval recv;
     fd_set readfds;
     int ns, nr;
     struct sockaddr_in ack_addr;
@@ -144,21 +152,51 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
             
             ns = sendto(sockfd, &temp_pkt, temp_pkt.h.pkt_size, 0,
                         (struct sockaddr *)dst, sizeof(struct sockaddr_in));
+            
             if (ns < 0) {
                 perror("rdt_send: sendto(PKT_DATA)");
                 free(packets);
                 return ERROR;
             }
+            gettimeofday(&send,NULL);
+            send_time[next_seq]=send.tv_sec+send.tv_usec;
             printf("rdt_send: Pacote enviado, seq %d\n", packets[next_seq].h.pkt_seq);
             next_seq++;
         }
         
         FD_ZERO(&readfds);
         FD_SET(sockfd, &readfds);
-        timeout.tv_sec = current_timeout_sec;
-        timeout.tv_usec = current_timeout_usec;
         
         int rv = select(sockfd + 1, &readfds, NULL, NULL, &timeout);
+        
+        gettimeofday(&recv,NULL);
+        
+        // Cálculo do TimeoutInterval
+        if (dynamic_timeout_enabled) {
+                sample_rtt = (recv.tv_sec - send.tv_sec) + (recv.tv_usec - send.tv_usec)/10e6;
+        	estimate_rtt = 0.875 * estimate_rtt + 0.125 * sample_rtt;
+        	
+        	// Cálculo do módulo de Dev_RTT
+        	if(sample_rtt-estimate_rtt>0)
+			dev_rtt = 0.75 * dev_rtt + 0.25 * (sample_rtt-estimate_rtt);
+ 		else
+ 			dev_rtt = 0.75 * dev_rtt + 0.25 * (estimate_rtt-sample_rtt);
+        
+        	// Atribuição
+        	timeout.tv_sec = estimate_rtt + 4 * dev_rtt;
+       		timeout.tv_usec = (estimate_rtt + 4 * dev_rtt - timeout.tv_sec) * 1000000;
+		
+		
+                if (timeout.tv_sec > MAX_TIMEOUT_SEC)
+                    timeout.tv_sec = MAX_TIMEOUT_SEC;
+                    
+                printf("rdt_send: Timeout dinâmico alterado para %ld.%ld s\n", timeout.tv_sec, timeout.tv_usec/1000);
+        }else{
+        	// Se for Timeout Estático
+        	timeout.tv_sec = current_timeout_sec;
+    		timeout.tv_usec = current_timeout_usec;
+        }
+        
         if (rv < 0) {
             perror("rdt_send: select error");
             free(packets);
@@ -166,18 +204,18 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
         } else if (rv == 0) {
             printf("rdt_send: Timeout. Retransmitindo a partir do pacote seq %d\n", packets[base].h.pkt_seq);
             next_seq = base;
-            if (dynamic_timeout_enabled) {
-                current_timeout_sec *= 2;
-                if (current_timeout_sec > MAX_TIMEOUT_SEC)
-                    current_timeout_sec = MAX_TIMEOUT_SEC;
-                printf("rdt_send: Timeout dinâmico aumentado para %d segundos\n", current_timeout_sec);
-            }
+            
+            // Cálculo da Janela Deslizante se Timeout
             if (dynamic_window_enabled){
+            	// Subtrai o valor do ultimo pacote previsto e divide a janela por 2
             	dw_count -=current_window_size;
             	current_window_size /= 2;
+            	
             	if (current_window_size < MIN_DYNAMIC_WINDOW)
                     current_window_size = MIN_DYNAMIC_WINDOW;
-                printf("rdt_send: Janela dinâmica diminuída para %d\n",current_window_size);
+                
+               	printf("rdt_send: Janela dinâmica diminuída para %d\n",current_window_size);
+               	// Contador recomeça do pacote retransmitido até o fim da proxíma janela diminuída
                 dw_count = packets[base].h.pkt_seq + current_window_size;
             }
             continue;
@@ -204,16 +242,26 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
                         printf("rdt_send: ACK duplicado (%d) para o pacote seq %d\n", dup_ack_count, ack.h.pkt_seq);
                         if (dup_ack_count >= 3) {
                             printf("rdt_send: Fast retransmission disparada para o pacote seq %d\n", packets[base].h.pkt_seq);
+                            
                             next_seq = base;
                             fastRetransmittedSeq = ack.h.pkt_seq;
                             dup_ack_count = 0;
-                            dw_count -= current_window_size;
-                            current_window_size /= 2;
-                            printf("rdt_send: Janela dinâmica diminuída para %d\n",current_window_size);
-                            dw_count = packets[base].h.pkt_seq + current_window_size;
+                            
+                            // Cálculo da Janela Deslizante se Timeout
+            		    if (dynamic_window_enabled){
+            		  	// Subtrai o valor do ultimo pacote previsto e divide a janela por 2
+            		        dw_count -=current_window_size;
+            			current_window_size /= 2;	
+		            	if (current_window_size < MIN_DYNAMIC_WINDOW)
+                		    current_window_size = MIN_DYNAMIC_WINDOW;
+                
+               			printf("rdt_send: Janela dinâmica diminuída para %d\n",current_window_size);
+               			// Contador recomeça do pacote retransmitido até o fim da proxíma janela diminuída
+                		dw_count = packets[base].h.pkt_seq + current_window_size;
+            		    }
                             continue;
                         }
-                    } else {
+                    }else {
                         printf("rdt_send: ACK duplicado para o mesmo pacote (seq %d) já retransmitido, ignorando.\n", ack.h.pkt_seq);
                     }
                 } else if (ack.h.pkt_seq > last_ack_seq) {
@@ -224,24 +272,7 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
                     if (ack_index >= base && ack_index < num_segments) {
                         printf("rdt_send: ACK recebido para o pacote seq %d\n", ack.h.pkt_seq);
                         base = ack_index + 1;
-                        if (dynamic_timeout_enabled){
-        	    	    if (current_timeout_sec > MIN_TIMEOUT_SEC) {
-		    		current_timeout_sec /= 2;
-		    		if (current_timeout_sec < MIN_TIMEOUT_SEC)
-	                		current_timeout_sec = MIN_TIMEOUT_SEC;
-	            		printf("rdt_send: Timeout dinâmico reduzido para %d segundos\n", current_timeout_sec);
-           		     }
-         		}
-                        if (dynamic_window_enabled){
-				if (ack.h.pkt_seq >= dw_count
-		 		    && current_window_size < MAX_DYNAMIC_WINDOW) {
-				    current_window_size++;
-				    if (current_window_size > MAX_DYNAMIC_WINDOW)
-				        current_window_size = MAX_DYNAMIC_WINDOW;
-			    	    printf("rdt_send: Janela dinâmica aumentada para %d\n", current_window_size);
-		    		    dw_count +=current_window_size;
-		    		}
-                        }
+			
                     }                
                  }
             } else {
@@ -255,25 +286,21 @@ int rdt_send(int sockfd, void *buf, int buf_len, struct sockaddr_in *dst) {
                     }
                 }
             }
-            if (dynamic_timeout_enabled){
-            	if (current_timeout_sec > MIN_TIMEOUT_SEC) {
-		    current_timeout_sec /= 2;
-		    if (current_timeout_sec < MIN_TIMEOUT_SEC)
-	                current_timeout_sec = MIN_TIMEOUT_SEC;
-	            printf("rdt_send: Timeout dinâmico reduzido para %d segundos\n", current_timeout_sec);
-           	}
-           }
+            
+           // Cálculo da Janela Deslizante se tudo certo
            if (dynamic_window_enabled){
-		if (ack.h.pkt_seq >= dw_count
-		     && current_window_size < MAX_DYNAMIC_WINDOW) {
+           	// Verifica se todos os ACKs da janela foram recebidos e a aumenta 
+	   	if (ack.h.pkt_seq >= dw_count && current_window_size < MAX_DYNAMIC_WINDOW) {
 		    current_window_size++;
+		    
 		    if (current_window_size > MAX_DYNAMIC_WINDOW)
 		        current_window_size = MAX_DYNAMIC_WINDOW;
-		    printf("rdt_send: Janela dinâmica aumentada para %d\n", current_window_size);
-		    
-		    dw_count +=current_window_size;
-		    }
-	    }
+	 	    printf("rdt_send: Janela dinâmica aumentada para %d\n", current_window_size);
+
+	    	    // Incremento do contador com a nova janela
+   		    dw_count +=current_window_size;
+    		}
+            }
         }
     }
     _snd_seqnum += num_segments;
@@ -567,8 +594,7 @@ int rdt_recv_file(int sockfd, const char *filename) {
                 return ERROR;
             }
             totalBytes += dataSize;
-            printf("rdt_recv_file: Pacote recebido, seq %d (%d bytes).\n", p.h.pkt_seq, dataSize);
-            
+            printf("rdt_recv_file: Pacote recebido, seq %d (%d bytes).\n", p.h.pkt_seq, dataSize); 
             if (make_pkt(&ack, PKT_ACK, p.h.pkt_seq, NULL, 0) < 0) {
                 fclose(fp);
                 return ERROR;
